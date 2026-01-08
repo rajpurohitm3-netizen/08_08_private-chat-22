@@ -103,6 +103,7 @@ export function UserDashboardView({ session, privateKey }: UserDashboardViewProp
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [isRegeneratingKeys, setIsRegeneratingKeys] = useState(false);
+  const [isUserTyping, setIsUserTyping] = useState(false);
   const notificationSound = useRef<HTMLAudioElement | null>(null);
   const presenceChannelRef = useRef<any>(null);
 
@@ -1071,9 +1072,18 @@ const advancedFeatures = [
                       </>
                     )}
                   </div>
-                ) : (
-                  <Chat session={session} privateKey={privateKey} initialContact={selectedContact} isPartnerOnline={onlineUsers.has(selectedContact.id)} onBack={() => setSelectedContact(null)} onInitiateCall={(c, m) => setActiveCall({ contact: c, mode: m, isInitiator: true })} />
-                )}
+                  ) : (
+                    <Chat 
+                      session={session} 
+                      privateKey={privateKey} 
+                      initialContact={selectedContact} 
+                      isPartnerOnline={onlineUsers.has(selectedContact.id)} 
+                      onBack={() => setSelectedContact(null)} 
+                      onInitiateCall={(c, m) => setActiveCall({ contact: c, mode: m, isInitiator: true })} 
+                      onTypingStatusChange={setIsUserTyping}
+                    />
+                  )}
+
               </motion.div>
             )}
 
@@ -1416,6 +1426,39 @@ const advancedFeatures = [
                 </Button>
               </div>
             </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {activeView === "chat" && selectedContact && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0, x: -20, y: 20 }}
+            animate={{ opacity: 1, scale: 1, x: 0, y: 0 }}
+            exit={{ opacity: 0, scale: 0, x: -20, y: 20 }}
+            className="fixed bottom-6 left-6 z-[60] pointer-events-none"
+          >
+            <div className="relative">
+              {/* Glow effect */}
+              <div className="absolute inset-0 bg-indigo-500 blur-xl opacity-40 animate-pulse rounded-full" />
+              
+              <motion.div
+                animate={isUserTyping ? {
+                  y: [0, -20, 0],
+                } : {
+                  y: 0
+                }}
+                transition={{
+                  duration: 0.6,
+                  repeat: isUserTyping ? Infinity : 0,
+                  ease: "easeInOut"
+                }}
+                className="w-12 h-12 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-full border-2 border-white/20 shadow-2xl flex items-center justify-center relative z-10"
+              >
+                <div className="w-6 h-6 bg-white/20 rounded-full animate-ping absolute" />
+                <MessageCircle className="w-6 h-6 text-white" />
+              </motion.div>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>

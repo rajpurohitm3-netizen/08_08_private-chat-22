@@ -33,6 +33,7 @@ interface ChatProps {
   onInitiateCall: (contact: any, mode: "video" | "voice") => void;
   isFriend?: boolean;
   onSendFriendRequest?: (userId: string) => void;
+  onTypingStatusChange?: (isTyping: boolean) => void;
 }
 
 function formatLastSeen(lastSeen: string | null): string {
@@ -118,6 +119,10 @@ export function Chat({ session, privateKey, initialContact, isPartnerOnline, onB
       window.removeEventListener("focus", handleFocus);
     };
   }, []);
+
+  useEffect(() => {
+    onTypingStatusChange?.(newMessage.length > 0);
+  }, [newMessage, onTypingStatusChange]);
 
   useEffect(() => {
     async function initMyPublicKey() {
