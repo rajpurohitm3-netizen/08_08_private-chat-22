@@ -103,7 +103,6 @@ export function UserDashboardView({ session, privateKey }: UserDashboardViewProp
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [isRegeneratingKeys, setIsRegeneratingKeys] = useState(false);
-  const [isLocalUserTyping, setIsLocalUserTyping] = useState(false);
   const notificationSound = useRef<HTMLAudioElement | null>(null);
   const presenceChannelRef = useRef<any>(null);
 
@@ -1073,15 +1072,7 @@ const advancedFeatures = [
                     )}
                   </div>
                 ) : (
-                  <Chat 
-                    session={session} 
-                    privateKey={privateKey} 
-                    initialContact={selectedContact} 
-                    isPartnerOnline={onlineUsers.has(selectedContact.id)} 
-                    onBack={() => setSelectedContact(null)} 
-                    onInitiateCall={(c, m) => setActiveCall({ contact: c, mode: m, isInitiator: true })} 
-                    onTypingStatusChange={setIsLocalUserTyping}
-                  />
+                  <Chat session={session} privateKey={privateKey} initialContact={selectedContact} isPartnerOnline={onlineUsers.has(selectedContact.id)} onBack={() => setSelectedContact(null)} onInitiateCall={(c, m) => setActiveCall({ contact: c, mode: m, isInitiator: true })} />
                 )}
               </motion.div>
             )}
@@ -1324,35 +1315,6 @@ const advancedFeatures = [
             )}
           </AnimatePresence>
         </main>
-
-        <AnimatePresence>
-          {selectedContact && (
-            <motion.div
-              initial={{ opacity: 0, scale: 0.8, x: -20 }}
-              animate={{ 
-                opacity: 1, 
-                scale: 1, 
-                x: 0,
-                y: isLocalUserTyping ? [0, -20, 0] : 0
-              }}
-              exit={{ opacity: 0, scale: 0.8, x: -20 }}
-              transition={{
-                y: {
-                  duration: 0.6,
-                  repeat: isLocalUserTyping ? Infinity : 0,
-                  ease: "easeInOut"
-                },
-                default: { duration: 0.3 }
-              }}
-              className="fixed bottom-6 left-6 z-[60] pointer-events-none"
-            >
-              <div className="relative">
-                <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-indigo-600 to-purple-500 shadow-[0_0_20px_rgba(79,70,229,0.5)] border border-white/20" />
-                <div className="absolute inset-0 rounded-full bg-indigo-500/20 animate-ping" />
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
 
         <AnimatePresence>
           {activeCall && <VideoCall key="video-call" userId={session.user.id} privateKey={privateKey} contact={activeCall.contact} callType={activeCall.mode} isInitiator={activeCall.isInitiator} incomingSignal={activeCall.incomingSignal} onClose={() => setActiveCall(null)} />}
