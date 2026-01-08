@@ -36,30 +36,14 @@ interface ChatProps {
   onTypingStatusChange?: (isTyping: boolean) => void;
 }
 
-function formatLastSeen(lastSeen: string | null): string {
-  if (!lastSeen) return "Offline";
-  const date = new Date(lastSeen);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  const diffHours = Math.floor(diffMs / 3600000);
-  const diffDays = Math.floor(diffMs / 86400000);
-  const timeStr = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-  if (diffMins < 1) return "Last seen just now";
-  if (diffMins < 60) return `Last seen ${diffMins}m ago`;
-  if (diffHours < 24 && date.getDate() === now.getDate()) return `Last seen today at ${timeStr}`;
-  if (diffDays === 1 || (diffHours < 48 && date.getDate() === now.getDate() - 1)) return `Last seen yesterday at ${timeStr}`;
-  const dateStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-  return `Last seen ${dateStr} at ${timeStr}`;
-}
-
-export function Chat({ session, privateKey, initialContact, isPartnerOnline, onBack, onInitiateCall, isFriend = true, onSendFriendRequest }: ChatProps) {
+export function Chat({ session, privateKey, initialContact, isPartnerOnline, onBack, onInitiateCall, isFriend = true, onSendFriendRequest, onTypingStatusChange }: ChatProps) {
   const router = useRouter();
   const [messages, setMessages] = useState<any[]>([]);
   const [newMessage, setNewMessage] = useState("");
   const [loading, setLoading] = useState(true);
   const [showOptions, setShowOptions] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
+  const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [contactProfile, setContactProfile] = useState<any>(initialContact);
   const [myPublicKey, setMyPublicKey] = useState<CryptoKey | null>(null);
   const [partnerPresence, setPartnerPresence] = useState<{isOnline: boolean; isInChat: boolean; isTyping: boolean;}>({ isOnline: false, isInChat: false, isTyping: false });
@@ -68,6 +52,68 @@ export function Chat({ session, privateKey, initialContact, isPartnerOnline, onB
   const [showSaveToVault, setShowSaveToVault] = useState<any>(null);
   const [vaultPassword, setVaultPassword] = useState("");
   const [longPressedMessage, setLongPressedMessage] = useState<any>(null);
+  const [showReactionMenu, setShowReactionMenu] = useState<string | null>(null);
+
+  const handleReaction = async (messageId: string, emoji: string) => {
+    try {
+      const message = messages.find(m => m.id === messageId);
+      if (!message) return;
+
+      const currentReactions = message.reactions || {};
+      const userReaction = currentReactions[session.user.id];
+
+      if (userReaction === emoji) {
+        delete currentReactions[session.user.id];
+      } else {
+        currentReactions[session.user.id] = emoji;
+      }
+
+      const { error } = await supabase
+        .from("messages")
+        .update({ reactions: currentReactions })
+        .eq("id", messageId);
+
+      if (error) throw error;
+      
+      setMessages(prev => prev.map(m => m.id === messageId ? { ...m, reactions: currentReactions } : m));
+      setShowReactionMenu(null);
+    } catch (err) {
+      toast.error("Failed to add reaction");
+    }
+  };
+
+  const handleSaveMessage = async (message: any) => {
+    try {
+      const { error } = await supabase
+        .from("messages")
+        .update({ is_saved: !message.is_saved })
+        .eq("id", message.id);
+
+      if (error) throw error;
+      
+      setMessages(prev => prev.map(m => m.id === message.id ? { ...m, is_saved: !message.is_saved } : m));
+      toast.success(message.is_saved ? "Unsaved" : "Saved to vault");
+      setShowReactionMenu(null);
+    } catch (err) {
+      toast.error("Failed to save message");
+    }
+  };
+
+  const longPressTimer = useRef<NodeJS.Timeout | null>(null);
+
+  const handlePointerDown = (messageId: string) => {
+    longPressTimer.current = setTimeout(() => {
+      setShowReactionMenu(messageId);
+    }, 500)
+  }
+
+  const handlePointerUp = () => {
+    if (longPressTimer.current) {
+      clearTimeout(longPressTimer.current);
+    }
+  }
+
+  const reactionsList = ["❤️", "👍", "🔥", "😂", "😮", "😢"];
   const [showMenu, setShowMenu] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [autoDeleteMode, setAutoDeleteMode] = useState<"none" | "view" | "1h" | "3h">(() => {
@@ -119,10 +165,6 @@ export function Chat({ session, privateKey, initialContact, isPartnerOnline, onB
       window.removeEventListener("focus", handleFocus);
     };
   }, []);
-
-  useEffect(() => {
-    onTypingStatusChange?.(newMessage.length > 0);
-  }, [newMessage, onTypingStatusChange]);
 
   useEffect(() => {
     async function initMyPublicKey() {
@@ -585,15 +627,56 @@ export function Chat({ session, privateKey, initialContact, isPartnerOnline, onB
             const isMe = msg.sender_id === session.user.id;
             const hasExpiry = msg.expires_at;
             const isViewOnce = msg.is_view_once && msg.media_type !== 'snapshot';
-              return (
-                <motion.div 
-                  key={msg.id} 
-                  initial={{ opacity: 0, y: 10, scale: 0.95 }} 
-                  animate={{ opacity: 1, y: 0, scale: 1 }} 
-                  className={`flex ${isMe ? "justify-end" : "justify-start"}`}
-                >
-                  <div className={`max-w-[85%] flex flex-col ${isMe ? "items-end" : "items-start"} group`}>
-                    {msg.media_type === 'snapshot' ? (
+                return (
+                  <motion.div 
+                    key={msg.id} 
+                    initial={{ opacity: 0, y: 10, scale: 0.95 }} 
+                    animate={{ opacity: 1, y: 0, scale: 1 }} 
+                    className={`flex ${isMe ? "justify-end" : "justify-start"}`}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setShowReactionMenu(msg.id);
+                    }}
+                  >
+                    <div 
+                      className={`max-w-[85%] flex flex-col ${isMe ? "items-end" : "items-start"} group relative`}
+                      onPointerDown={() => handlePointerDown(msg.id)}
+                      onPointerUp={handlePointerUp}
+                      onPointerLeave={handlePointerUp}
+                    >
+                      {showReactionMenu === msg.id && (
+                        <motion.div 
+                          initial={{ opacity: 0, y: 10, scale: 0.8 }}
+                          animate={{ opacity: 1, y: 0, scale: 1 }}
+                          exit={{ opacity: 0, y: 10, scale: 0.8 }}
+                          className={`absolute z-[100] -top-14 ${isMe ? 'right-0' : 'left-0'} bg-[#1a1a1a] border border-white/10 rounded-2xl p-2 shadow-2xl flex items-center gap-1`}
+                        >
+                          {reactionsList.map(emoji => (
+                            <button 
+                              key={emoji} 
+                              onClick={() => handleReaction(msg.id, emoji)}
+                              className="w-8 h-8 flex items-center justify-center hover:bg-white/10 rounded-lg transition-colors text-lg"
+                            >
+                              {emoji}
+                            </button>
+                          ))}
+                          <div className="w-px h-6 bg-white/10 mx-1" />
+                          <button 
+                            onClick={() => handleSaveMessage(msg)}
+                            className={`p-2 hover:bg-white/10 rounded-lg transition-colors ${msg.is_saved ? 'text-indigo-400' : 'text-white/40'}`}
+                          >
+                            <Save className="w-4 h-4" />
+                          </button>
+                          <button 
+                            onClick={() => setShowReactionMenu(null)}
+                            className="p-2 hover:bg-white/10 rounded-lg text-white/40"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </motion.div>
+                      )}
+
+                      {msg.media_type === 'snapshot' ? (
                       <button 
                         onClick={() => openSnapshot(msg)} 
                         className="p-5 rounded-[2.5rem] border bg-indigo-500/10 border-indigo-500/20 hover:bg-indigo-500/20 transition-all flex items-center gap-4 shadow-lg shadow-indigo-500/5 group"
@@ -614,20 +697,45 @@ export function Chat({ session, privateKey, initialContact, isPartnerOnline, onB
                         </div>
                       </div>
                     ) : (
-                      <div className={`p-5 px-6 rounded-[2.2rem] text-[13px] font-medium leading-relaxed shadow-2xl relative transition-all hover:translate-y-[-1px] ${
-                        isMe 
-                          ? "bg-gradient-to-br from-indigo-600 to-indigo-700 text-white border border-indigo-500/30 rounded-tr-none" 
-                          : "bg-white/[0.04] backdrop-blur-xl border border-white/10 text-white/90 rounded-tl-none"
-                      }`}>
-                        {msg.decrypted_content || "🔒 Signal Encrypted"}
-                        {isViewOnce && (
-                          <div className="absolute -top-3 -right-3 bg-gradient-to-br from-orange-500 to-red-500 rounded-full p-1.5 shadow-lg border border-black/20">
-                            <Eye className="w-3 h-3 text-white" />
-                          </div>
-                        )}
-                      </div>
-                    )}
-                    <div className={`flex items-center gap-3 mt-2 px-3 opacity-0 group-hover:opacity-100 transition-opacity duration-300 ${isMe ? "flex-row-reverse" : "flex-row"}`}>
+                        <div className={`p-5 px-6 rounded-[2.2rem] text-[13px] font-medium leading-relaxed shadow-2xl relative transition-all hover:translate-y-[-1px] ${
+                          isMe 
+                            ? "bg-gradient-to-br from-indigo-600 to-indigo-700 text-white border border-indigo-500/30 rounded-tr-none" 
+                            : "bg-white/[0.04] backdrop-blur-xl border border-white/10 text-white/90 rounded-tl-none"
+                        }`}>
+                          {msg.decrypted_content || "🔒 Signal Encrypted"}
+                          {isViewOnce && (
+                            <div className="absolute -top-3 -right-3 bg-gradient-to-br from-orange-500 to-red-500 rounded-full p-1.5 shadow-lg border border-black/20">
+                              <Eye className="w-3 h-3 text-white" />
+                            </div>
+                          )}
+                          {msg.is_saved && (
+                            <div className={`absolute -bottom-1 ${isMe ? '-left-1' : '-right-1'} bg-indigo-600 rounded-full p-1 shadow-lg border border-black/20`}>
+                              <Save className="w-2 h-2 text-white" />
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      
+                      {msg.reactions && Object.keys(msg.reactions).length > 0 && (
+                        <div className={`flex flex-wrap gap-1 mt-1 ${isMe ? 'justify-end' : 'justify-start'}`}>
+                          {Object.entries(msg.reactions).reduce((acc: any, [uid, emoji]: any) => {
+                            const existing = acc.find((r: any) => r.emoji === emoji);
+                            if (existing) {
+                              existing.count++;
+                            } else {
+                              acc.push({ emoji, count: 1 });
+                            }
+                            return acc;
+                          }, []).map((r: any) => (
+                            <div key={r.emoji} className="bg-white/5 border border-white/10 rounded-full px-2 py-0.5 flex items-center gap-1">
+                              <span className="text-xs">{r.emoji}</span>
+                              {r.count > 1 && <span className="text-[9px] font-bold text-white/40">{r.count}</span>}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      <div className={`flex items-center gap-3 mt-2 px-3 opacity-0 group-hover:opacity-100 transition-opacity duration-300 ${isMe ? "flex-row-reverse" : "flex-row"}`}>
                       <span className="text-[8px] font-bold uppercase tracking-widest text-white/20">
                         {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })}
                       </span>
@@ -673,7 +781,32 @@ export function Chat({ session, privateKey, initialContact, isPartnerOnline, onB
           )}
           <div className="flex items-center gap-3 relative">
             <Button variant="ghost" size="icon" onClick={() => setShowOptions(!showOptions)} className={`h-12 w-12 rounded-2xl transition-all ${showOptions ? 'bg-indigo-600 text-white rotate-45' : 'bg-white/5 text-white/20'}`}><Plus className="w-6 h-6" /></Button>
-            <input value={newMessage} onChange={(e) => setNewMessage(e.target.value)} onKeyDown={(e) => e.key === "Enter" && sendMessage()} placeholder="Type signal packet..." className="flex-1 bg-white/[0.03] border border-white/10 rounded-[2rem] h-12 px-6 text-sm outline-none focus:border-indigo-500/50" />
+            <input 
+              value={newMessage} 
+              onChange={(e) => {
+                setNewMessage(e.target.value);
+                if (onTypingStatusChange) {
+                  if (!isTyping && e.target.value.length > 0) {
+                    setIsTyping(true);
+                    onTypingStatusChange(true);
+                  } else if (isTyping && e.target.value.length === 0) {
+                    setIsTyping(false);
+                    onTypingStatusChange(false);
+                  }
+                }
+                
+                if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+                typingTimeoutRef.current = setTimeout(() => {
+                  if (isTyping) {
+                    setIsTyping(false);
+                    onTypingStatusChange?.(false);
+                  }
+                }, 3000);
+              }} 
+              onKeyDown={(e) => e.key === "Enter" && sendMessage()} 
+              placeholder="Type signal packet..." 
+              className="flex-1 bg-white/[0.03] border border-white/10 rounded-[2rem] h-12 px-6 text-sm outline-none focus:border-indigo-500/50" 
+            />
             <Button onClick={() => sendMessage()} disabled={!newMessage.trim()} className="h-12 w-12 rounded-2xl bg-indigo-600 hover:bg-indigo-500 shadow-lg shadow-indigo-600/20 disabled:opacity-20"><Send className="w-5 h-5" /></Button>
             <AnimatePresence>{showOptions && (<motion.div initial={{ opacity: 0, y: 10, scale: 0.9 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 10, scale: 0.9 }} className="absolute bottom-20 left-0 w-64 bg-[#0a0a0a] border border-white/10 rounded-[2.5rem] p-4 shadow-2xl z-50 overflow-hidden"><div className="grid grid-cols-2 gap-2"><label className="flex flex-col items-center justify-center p-4 bg-white/[0.02] border border-white/5 rounded-2xl cursor-pointer"><ImageIcon className="w-6 h-6 text-indigo-400 mb-2" /><span className="text-[8px] font-black uppercase text-white/40">Photo</span><input type="file" className="hidden" accept="image/*" onChange={(e) => handleFileUpload(e, "image")} /></label><button onClick={() => startCamera()} className="flex flex-col items-center justify-center p-4 bg-purple-600/5 border border-purple-500/20 rounded-2xl"><Camera className="w-6 h-6 text-purple-400 mb-2" /><span className="text-[8px] font-black uppercase text-white/40">Snapshot</span></button></div></motion.div>)}</AnimatePresence>
           </div>
