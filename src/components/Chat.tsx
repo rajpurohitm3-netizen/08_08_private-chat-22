@@ -11,7 +11,7 @@ import {
     Sparkles, Zap, ChevronLeft, Phone, Check, CheckCheck, ArrowLeft,
     MoreVertical, Trash, Star, Heart, ThumbsUp, Smile, Frown, Meh,
     Volume2, VolumeX, Minimize2, Maximize2, CameraOff, SwitchCamera,
-    RefreshCw, Clock, MapPin as LocationIcon, FileUp, MicOff
+    RefreshCw, Clock
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -61,13 +61,21 @@ export function Chat({ session, privateKey, initialContact, isPartnerOnline, onB
   const [isTyping, setIsTyping] = useState(false);
   const [contactProfile, setContactProfile] = useState<any>(initialContact);
   const [myPublicKey, setMyPublicKey] = useState<CryptoKey | null>(null);
-  const [partnerPresence, setPartnerPresence] = useState<{isOnline: boolean; isInChat: boolean; isTyping: boolean;}>({ isOnline: false, isInChat: false, isTyping: false });
-  const [isFocused, setIsFocused] = useState(true);
-  const [showSnapshotView, setShowSnapshotView] = useState<any>(null);
-  const [showSaveToVault, setShowSaveToVault] = useState<any>(null);
-  const [vaultPassword, setVaultPassword] = useState("");
-  const [longPressedMessage, setLongPressedMessage] = useState<any>(null);
-  const [showMenu, setShowMenu] = useState(false);
+    const [partnerPresence, setPartnerPresence] = useState<{isOnline: boolean; isInChat: boolean; isTyping: boolean;}>({ isOnline: false, isInChat: false, isTyping: false });
+    const [isFocused, setIsFocused] = useState(true);
+    const [showSnapshotView, setShowSnapshotView] = useState<any>(null);
+    const [showSaveToVault, setShowSaveToVault] = useState<any>(null);
+    const [vaultPassword, setVaultPassword] = useState("");
+    const [longPressedMessage, setLongPressedMessage] = useState<any>(null);
+    const [showReactions, setShowReactions] = useState<string | null>(null);
+    const [isRecording, setIsRecording] = useState(false);
+    const [recordingTime, setRecordingTime] = useState(0);
+    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+    const audioChunksRef = useRef<Blob[]>([]);
+    const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+    const [showMenu, setShowMenu] = useState(false);
+
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [autoDeleteMode, setAutoDeleteMode] = useState<"none" | "view" | "1h" | "3h">(() => {
     if (typeof window !== "undefined") {
@@ -98,81 +106,6 @@ export function Chat({ session, privateKey, initialContact, isPartnerOnline, onB
   const videoRef = useRef<HTMLVideoElement>(null);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [cameraFacingMode, setCameraFacingMode] = useState<"user" | "environment">("user");
-  
-  const [isRecording, setIsRecording] = useState(false);
-  const [recordingTime, setRecordingTime] = useState(0);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
-  const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
-
-  const startRecording = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = mediaRecorder;
-      audioChunksRef.current = [];
-
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
-      };
-
-      mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-        const fileName = `voice-${Date.now()}.webm`;
-        const filePath = `chat/${session.user.id}/${fileName}`;
-        const { error } = await supabase.storage.from("chat-media").upload(filePath, audioBlob);
-        
-        if (!error) {
-          const { data: { publicUrl } } = supabase.storage.from("chat-media").getPublicUrl(filePath);
-          await sendMessage("audio", publicUrl);
-        }
-        stream.getTracks().forEach(track => track.stop());
-      };
-
-      mediaRecorder.start();
-      setIsRecording(true);
-      setRecordingTime(0);
-      recordingTimerRef.current = setInterval(() => {
-        setRecordingTime(prev => prev + 1);
-      }, 1000);
-    } catch (err) {
-      toast.error("Microphone access denied");
-    }
-  };
-
-  const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
-      if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
-    }
-  };
-
-  const sendLocation = () => {
-    if (!navigator.geolocation) {
-      toast.error("Geolocation not supported");
-      return;
-    }
-
-    navigator.geolocation.getCurrentPosition(
-      async (position) => {
-        const { latitude, longitude } = position.coords;
-        const locationUrl = `https://www.google.com/maps?q=${latitude},${longitude}`;
-        await sendMessage("location", locationUrl);
-      },
-      () => {
-        toast.error("Could not retrieve location");
-      }
-    );
-  };
-
-  useEffect(() => {
-    return () => {
-      if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
-    };
-  }, []);
   
   useEffect(() => {
     if (showCamera && stream && videoRef.current) {
@@ -378,7 +311,28 @@ export function Chat({ session, privateKey, initialContact, isPartnerOnline, onB
   }
 
   function subscribeToMessages() {
-    return supabase.channel(`chat-${contactProfile.id}`)
+    const channel = supabase.channel(`chat-${contactProfile.id}`, {
+      config: {
+        presence: {
+          key: session.user.id,
+        },
+      },
+    });
+
+    channel
+      .on("presence", { event: "sync" }, () => {
+        const state = channel.presenceState();
+        const partnerState = state[contactProfile.id] as any;
+        if (partnerState && partnerState[0]) {
+          setPartnerPresence({
+            isOnline: true,
+            isInChat: partnerState[0].isInChat,
+            isTyping: partnerState[0].isTyping,
+          });
+        } else {
+          setPartnerPresence({ isOnline: false, isInChat: false, isTyping: false });
+        }
+      })
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages", filter: `receiver_id=eq.${session.user.id}` }, async (payload) => {
         if (payload.new.sender_id === contactProfile.id) {
           await new Promise(resolve => setTimeout(resolve, 100));
@@ -424,8 +378,47 @@ export function Chat({ session, privateKey, initialContact, isPartnerOnline, onB
       .on("postgres_changes", { event: "DELETE", schema: "public", table: "messages" }, async (payload) => {
         setMessages(prev => prev.filter(m => m.id !== payload.old.id));
       })
-      .subscribe();
+      .subscribe(async (status) => {
+        if (status === "SUBSCRIBED") {
+          await channel.track({
+            user_id: session.user.id,
+            isInChat: true,
+            isTyping: false,
+          });
+        }
+      });
+
+    return channel;
   }
+
+  const handleTypingStatusChange = useCallback(async (typing: boolean) => {
+    const channel = supabase.getChannels().find(c => c.name === `chat-${contactProfile.id}`);
+    if (channel) {
+      await channel.track({
+        user_id: session.user.id,
+        isInChat: true,
+        isTyping: typing,
+      });
+    }
+  }, [contactProfile.id, session.user.id]);
+
+  useEffect(() => {
+    if (newMessage.trim() && !isTyping) {
+      setIsTyping(true);
+      handleTypingStatusChange(true);
+    } else if (!newMessage.trim() && isTyping) {
+      setIsTyping(false);
+      handleTypingStatusChange(false);
+    }
+
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    if (newMessage.trim()) {
+      typingTimeoutRef.current = setTimeout(() => {
+        setIsTyping(false);
+        handleTypingStatusChange(false);
+      }, 3000);
+    }
+  }, [newMessage, isTyping, handleTypingStatusChange]);
 
   useEffect(() => {
     fetchMessages();
@@ -515,14 +508,112 @@ export function Chat({ session, privateKey, initialContact, isPartnerOnline, onB
     }
   }
 
-  const startCamera = async (facingMode: "user" | "environment" = "user") => {
-    try {
-      if (stream) stream.getTracks().forEach(track => track.stop());
-      const s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facingMode } });
-      setStream(s);
-      setShowCamera(true);
-    } catch (err) { toast.error("Camera access denied"); }
-  };
+    const startRecording = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorderRef.current = new MediaRecorder(stream);
+        audioChunksRef.current = [];
+        
+        mediaRecorderRef.current.ondataavailable = (e) => {
+          if (e.data.size > 0) audioChunksRef.current.push(e.data);
+        };
+        
+        mediaRecorderRef.current.onstop = async () => {
+          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+          const fileName = `audio-${Date.now()}.webm`;
+          const filePath = `chat/${session.user.id}/${fileName}`;
+          const { error } = await supabase.storage.from("chat-media").upload(filePath, audioBlob);
+          if (!error) {
+            const { data: { publicUrl } } = supabase.storage.from("chat-media").getPublicUrl(filePath);
+            await sendMessage("audio", publicUrl);
+          }
+          stream.getTracks().forEach(track => track.stop());
+        };
+        
+        mediaRecorderRef.current.start();
+        setIsRecording(true);
+        setRecordingTime(0);
+      } catch (err) {
+        toast.error("Microphone access denied");
+      }
+    };
+
+    const stopRecording = () => {
+      if (mediaRecorderRef.current && isRecording) {
+        mediaRecorderRef.current.stop();
+        setIsRecording(false);
+      }
+    };
+
+    useEffect(() => {
+      let interval: NodeJS.Timeout;
+      if (isRecording) {
+        interval = setInterval(() => {
+          setRecordingTime(prev => prev + 1);
+        }, 1000);
+      }
+      return () => clearInterval(interval);
+    }, [isRecording]);
+
+    const sendLocation = () => {
+      if (!navigator.geolocation) {
+        toast.error("Geolocation not supported");
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(async (pos) => {
+        const { latitude, longitude } = pos.coords;
+        const locationUrl = `https://www.google.com/maps?q=${latitude},${longitude}`;
+        await sendMessage("location", locationUrl);
+      }, () => {
+        toast.error("Location access denied");
+      });
+    };
+
+    const addReaction = async (messageId: string, emoji: string) => {
+      const { data: msg } = await supabase.from("messages").select("reactions").eq("id", messageId).single();
+      const currentReactions = msg?.reactions || {};
+      const userReactions = currentReactions[emoji] || [];
+      
+      if (userReactions.includes(session.user.id)) {
+        currentReactions[emoji] = userReactions.filter((id: string) => id !== session.user.id);
+      } else {
+        currentReactions[emoji] = [...userReactions, session.user.id];
+      }
+      
+      await supabase.from("messages").update({ reactions: currentReactions }).eq("id", messageId);
+      setShowReactions(null);
+    };
+
+    const saveToVault = async (message: any) => {
+      const { error } = await supabase.from("vault_items").insert({
+        user_id: session.user.id,
+        content: message.decrypted_content,
+        media_type: message.media_type,
+        media_url: message.media_url,
+        sender_username: message.sender_id === session.user.id ? "Me" : contactProfile.username
+      });
+      
+      if (error) {
+        toast.error("Failed to save to vault");
+      } else {
+        toast.success("Saved to Private Vault");
+      }
+      setLongPressedMessage(null);
+    };
+
+    const [touchStart, setTouchStart] = useState<number | null>(null);
+    const handleTouchStart = (msg: any) => {
+      setTouchStart(Date.now());
+      const timeout = setTimeout(() => {
+        setLongPressedMessage(msg);
+      }, 500);
+      return () => clearTimeout(timeout);
+    };
+
+    const handleTouchEnd = () => {
+      setTouchStart(null);
+    };
+
 
   const capturePhoto = async () => {
     if (!videoRef.current) return;
@@ -649,33 +740,47 @@ export function Chat({ session, privateKey, initialContact, isPartnerOnline, onB
           </div>
       </header>
 
-      <div className="flex-1 overflow-y-auto custom-scrollbar p-6 space-y-6">
-        {loading ? (<div className="flex items-center justify-center h-full animate-spin border-2 border-indigo-500 border-t-transparent rounded-full w-8 h-8 mx-auto" />) : messages.length === 0 ? (<div className="flex flex-col items-center justify-center h-full opacity-20"><ShieldCheck className="w-12 h-12 mb-4" /><p className="text-[10px] font-black uppercase tracking-[0.4em]">End-to-End Encrypted</p></div>) : (
-          messages.map((msg) => {
+        <div className="flex-1 overflow-y-auto custom-scrollbar p-6 space-y-6 relative">
+          {partnerPresence.isTyping && (
+            <div className="absolute bottom-4 left-6 z-10 flex items-center gap-2 px-4 py-2 bg-white/5 backdrop-blur-md border border-white/10 rounded-full animate-in fade-in slide-in-from-bottom-2">
+              <motion.div 
+                animate={{ y: [0, -4, 0] }}
+                transition={{ duration: 0.6, repeat: Infinity, ease: "easeInOut" }}
+                className="w-1.5 h-1.5 bg-indigo-500 rounded-full shadow-[0_0_8px_rgba(99,102,241,0.8)]"
+              />
+              <span className="text-[9px] font-black uppercase tracking-widest text-indigo-400">Signal Incoming...</span>
+            </div>
+          )}
+          {loading ? (<div className="flex items-center justify-center h-full animate-spin border-2 border-indigo-500 border-t-transparent rounded-full w-8 h-8 mx-auto" />) : messages.length === 0 ? (<div className="flex flex-col items-center justify-center h-full opacity-20"><ShieldCheck className="w-12 h-12 mb-4" /><p className="text-[10px] font-black uppercase tracking-[0.4em]">End-to-End Encrypted</p></div>) : (
+            messages.map((msg) => {
+
             const isMe = msg.sender_id === session.user.id;
             const hasExpiry = msg.expires_at;
             const isViewOnce = msg.is_view_once && msg.media_type !== 'snapshot';
-              return (
-                <motion.div 
-                  key={msg.id} 
-                  initial={{ opacity: 0, y: 10, scale: 0.95 }} 
-                  animate={{ opacity: 1, y: 0, scale: 1 }} 
-                  className={`flex ${isMe ? "justify-end" : "justify-start"}`}
-                >
-                  <div className={`max-w-[85%] flex flex-col ${isMe ? "items-end" : "items-start"} group`}>
-                    {msg.media_type === 'snapshot' ? (
-                      <button 
-                        onClick={() => openSnapshot(msg)} 
-                        className="p-5 rounded-[2.5rem] border bg-indigo-500/10 border-indigo-500/20 hover:bg-indigo-500/20 transition-all flex items-center gap-4 shadow-lg shadow-indigo-500/5 group"
-                      >
-                        <div className="p-3 bg-indigo-500 rounded-2xl group-hover:scale-110 transition-transform">
-                          <Camera className="w-5 h-5 text-white" />
-                        </div>
-                        <div className="text-left">
-                          <p className="text-[10px] font-black uppercase tracking-widest text-white">Hidden Signal</p>
-                          <p className="text-[8px] font-bold uppercase tracking-widest text-indigo-400">View Once Protocol</p>
-                        </div>
-                      </button>
+                return (
+                  <motion.div 
+                    key={msg.id} 
+                    initial={{ opacity: 0, y: 10, scale: 0.95 }} 
+                    animate={{ opacity: 1, y: 0, scale: 1 }} 
+                    className={`flex ${isMe ? "justify-end" : "justify-start"} relative`}
+                    onContextMenu={(e) => { e.preventDefault(); setLongPressedMessage(msg); }}
+                    onTouchStart={() => handleTouchStart(msg)}
+                    onTouchEnd={handleTouchEnd}
+                  >
+                    <div className={`max-w-[85%] flex flex-col ${isMe ? "items-end" : "items-start"} group`}>
+                      {msg.media_type === 'snapshot' ? (
+                        <button 
+                          onClick={() => openSnapshot(msg)} 
+                          className="p-5 rounded-[2.5rem] border bg-indigo-500/10 border-indigo-500/20 hover:bg-indigo-500/20 transition-all flex items-center gap-4 shadow-lg shadow-indigo-500/5 group"
+                        >
+                          <div className="p-3 bg-indigo-500 rounded-2xl group-hover:scale-110 transition-transform">
+                            <Camera className="w-5 h-5 text-white" />
+                          </div>
+                          <div className="text-left">
+                            <p className="text-[10px] font-black uppercase tracking-widest text-white">Hidden Signal</p>
+                            <p className="text-[8px] font-bold uppercase tracking-widest text-indigo-400">View Once Protocol</p>
+                          </div>
+                        </button>
                       ) : msg.media_type === 'image' ? (
                         <div className="relative group">
                           <img src={msg.media_url} alt="" className="rounded-[2.5rem] border border-white/10 max-h-80 shadow-2xl transition-transform hover:scale-[1.02]" />
@@ -684,46 +789,18 @@ export function Chat({ session, privateKey, initialContact, isPartnerOnline, onB
                           </div>
                         </div>
                       ) : msg.media_type === 'video' ? (
-                        <div className="relative group rounded-[2.5rem] overflow-hidden border border-white/10 shadow-2xl">
-                          <video src={msg.media_url} controls className="max-h-80 w-full" />
-                        </div>
+                        <video src={msg.media_url} controls className="rounded-[2.5rem] border border-white/10 max-h-80 shadow-2xl" />
                       ) : msg.media_type === 'audio' ? (
-                        <div className={`p-4 px-6 rounded-[2.2rem] shadow-2xl relative transition-all ${
-                          isMe 
-                            ? "bg-gradient-to-br from-indigo-600 to-indigo-700 border border-indigo-500/30 rounded-tr-none" 
-                            : "bg-white/[0.04] backdrop-blur-xl border border-white/10 rounded-tl-none"
-                        }`}>
-                          <div className="flex items-center gap-3 min-w-[200px]">
-                            <div className="p-2 bg-white/10 rounded-full">
-                              <Volume2 className="w-4 h-4 text-white" />
-                            </div>
-                            <audio src={msg.media_url} controls className="h-8 flex-1 invert opacity-60 hover:opacity-100 transition-opacity" />
-                          </div>
-                          <p className="text-[7px] font-black uppercase tracking-widest text-white/40 mt-2 text-center">Voice Signal Packet</p>
+                        <div className={`p-4 rounded-3xl bg-white/5 border border-white/10 flex items-center gap-3 ${isMe ? "bg-indigo-600/20" : ""}`}>
+                          <div className="p-2 bg-indigo-500 rounded-full"><Volume2 className="w-4 h-4 text-white" /></div>
+                          <audio src={msg.media_url} controls className="h-8 w-40" />
                         </div>
                       ) : msg.media_type === 'location' ? (
-                        <a 
-                          href={msg.media_url} 
-                          target="_blank" 
-                          rel="noopener noreferrer"
-                          className={`p-5 rounded-[2.2rem] shadow-2xl relative transition-all flex flex-col gap-3 group/loc ${
-                            isMe 
-                              ? "bg-gradient-to-br from-indigo-600 to-indigo-700 border border-indigo-500/30 rounded-tr-none" 
-                              : "bg-white/[0.04] backdrop-blur-xl border border-white/10 rounded-tl-none"
-                          }`}
-                        >
-                          <div className="w-full h-32 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center overflow-hidden relative">
-                            <div className="absolute inset-0 bg-indigo-500/10 animate-pulse" />
-                            <LocationIcon className="w-8 h-8 text-indigo-400 relative z-10 group-hover/loc:scale-110 transition-transform" />
-                          </div>
-                          <div className="flex items-center justify-between">
-                            <div>
-                              <p className="text-[10px] font-black uppercase tracking-widest text-white">Current Location</p>
-                              <p className="text-[8px] font-bold uppercase tracking-widest text-white/40 italic">Open in Matrix Maps</p>
-                            </div>
-                            <div className="p-2 bg-white/10 rounded-xl">
-                              <Globe className="w-4 h-4 text-white" />
-                            </div>
+                        <a href={msg.media_url} target="_blank" rel="noopener noreferrer" className="p-4 rounded-[2rem] bg-white/5 border border-white/10 flex items-center gap-3 hover:bg-white/10 transition-all">
+                          <div className="p-3 bg-red-500 rounded-xl"><MapPin className="w-5 h-5 text-white" /></div>
+                          <div>
+                            <p className="text-[10px] font-black uppercase text-white">Live Location</p>
+                            <p className="text-[8px] font-bold uppercase text-white/40 tracking-widest">Tap to view map</p>
                           </div>
                         </a>
                       ) : (
@@ -740,7 +817,20 @@ export function Chat({ session, privateKey, initialContact, isPartnerOnline, onB
                           )}
                         </div>
                       )}
-                    <div className={`flex items-center gap-3 mt-2 px-3 opacity-0 group-hover:opacity-100 transition-opacity duration-300 ${isMe ? "flex-row-reverse" : "flex-row"}`}>
+
+                      {msg.reactions && Object.keys(msg.reactions).some(k => msg.reactions[k].length > 0) && (
+                        <div className={`flex gap-1 mt-1 ${isMe ? "justify-end" : "justify-start"}`}>
+                          {Object.entries(msg.reactions).map(([emoji, users]: [string, any]) => users.length > 0 && (
+                            <div key={emoji} className="bg-white/10 border border-white/10 rounded-full px-2 py-0.5 text-[10px] flex items-center gap-1">
+                              <span>{emoji}</span>
+                              <span className="text-[8px] font-bold text-white/40">{users.length}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      <div className={`flex items-center gap-3 mt-2 px-3 opacity-0 group-hover:opacity-100 transition-opacity duration-300 ${isMe ? "flex-row-reverse" : "flex-row"}`}>
+
                       <span className="text-[8px] font-bold uppercase tracking-widest text-white/20">
                         {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })}
                       </span>
@@ -771,119 +861,164 @@ export function Chat({ session, privateKey, initialContact, isPartnerOnline, onB
         <div ref={messagesEndRef} />
       </div>
 
-      <footer className="p-6 bg-black/40 backdrop-blur-3xl border-t border-white/5 shrink-0">
-          {autoDeleteMode !== "none" && (
-            <div className="mb-3 flex items-center justify-center gap-2">
-              <div className={`px-3 py-1.5 rounded-full text-[8px] font-black uppercase tracking-widest flex items-center gap-1.5 ${
-                autoDeleteMode === "view" ? "bg-orange-500/20 text-orange-400 border border-orange-500/30" :
-                autoDeleteMode === "1h" ? "bg-amber-500/20 text-amber-400 border border-amber-500/30" :
-                "bg-red-500/20 text-red-400 border border-red-500/30"
-              }`}>
-                {autoDeleteMode === "view" ? <Eye className="w-3 h-3" /> : <Clock className="w-3 h-3" />}
-                {autoDeleteMode === "view" ? "Delete After View" : autoDeleteMode === "1h" ? "Delete After 1 Hour" : "Delete After 3 Hours"}
+        <footer className="p-6 bg-black/40 backdrop-blur-3xl border-t border-white/5 shrink-0 relative">
+            {isRecording ? (
+              <div className="flex items-center gap-4 bg-red-500/10 border border-red-500/20 p-4 rounded-3xl animate-pulse">
+                <div className="w-3 h-3 bg-red-500 rounded-full animate-ping" />
+                <span className="text-[10px] font-black uppercase tracking-widest text-red-500 flex-1">Recording: {recordingTime}s</span>
+                <Button onClick={stopRecording} className="bg-red-600 hover:bg-red-700 rounded-xl h-10 px-6 text-[10px] font-black uppercase">Stop & Send</Button>
               </div>
-            </div>
-          )}
-          <div className="flex items-center gap-3 relative">
-            <Button variant="ghost" size="icon" onClick={() => setShowOptions(!showOptions)} className={`h-12 w-12 rounded-2xl transition-all ${showOptions ? 'bg-indigo-600 text-white rotate-45' : 'bg-white/5 text-white/20'}`}><Plus className="w-6 h-6" /></Button>
-            <input value={newMessage} onChange={(e) => setNewMessage(e.target.value)} onKeyDown={(e) => e.key === "Enter" && sendMessage()} placeholder="Type signal packet..." className="flex-1 bg-white/[0.03] border border-white/10 rounded-[2rem] h-12 px-6 text-sm outline-none focus:border-indigo-500/50" />
-            <Button onClick={() => sendMessage()} disabled={!newMessage.trim()} className="h-12 w-12 rounded-2xl bg-indigo-600 hover:bg-indigo-500 shadow-lg shadow-indigo-600/20 disabled:opacity-20"><Send className="w-5 h-5" /></Button>
-              <AnimatePresence>
-                {showOptions && (
-                  <motion.div 
-                    initial={{ opacity: 0, y: 10, scale: 0.9 }} 
-                    animate={{ opacity: 1, y: 0, scale: 1 }} 
-                    exit={{ opacity: 0, y: 10, scale: 0.9 }} 
-                    className="absolute bottom-20 left-0 w-72 bg-[#0a0a0a] border border-white/10 rounded-[2.5rem] p-4 shadow-2xl z-50 overflow-hidden"
-                  >
-                    <div className="grid grid-cols-3 gap-2">
-                      <label className="flex flex-col items-center justify-center p-3 bg-white/[0.02] border border-white/5 rounded-2xl cursor-pointer hover:bg-white/[0.05] transition-colors">
-                        <ImageIcon className="w-5 h-5 text-indigo-400 mb-1" />
-                        <span className="text-[7px] font-black uppercase text-white/40">Photo</span>
-                        <input type="file" className="hidden" accept="image/*" onChange={(e) => handleFileUpload(e, "image")} />
-                      </label>
-                      <button onClick={() => startCamera()} className="flex flex-col items-center justify-center p-3 bg-purple-600/5 border border-purple-500/20 rounded-2xl hover:bg-purple-600/10 transition-colors">
-                        <Camera className="w-5 h-5 text-purple-400 mb-1" />
-                        <span className="text-[7px] font-black uppercase text-white/40">Snapshot</span>
-                      </button>
-                      <label className="flex flex-col items-center justify-center p-3 bg-white/[0.02] border border-white/5 rounded-2xl cursor-pointer hover:bg-white/[0.05] transition-colors">
-                        <Video className="w-5 h-5 text-blue-400 mb-1" />
-                        <span className="text-[7px] font-black uppercase text-white/40">Video</span>
-                        <input type="file" className="hidden" accept="video/*" onChange={(e) => handleFileUpload(e, "video")} />
-                      </label>
-                      <label className="flex flex-col items-center justify-center p-3 bg-white/[0.02] border border-white/5 rounded-2xl cursor-pointer hover:bg-white/[0.05] transition-colors">
-                        <FileUp className="w-5 h-5 text-emerald-400 mb-1" />
-                        <span className="text-[7px] font-black uppercase text-white/40">Audio</span>
-                        <input type="file" className="hidden" accept="audio/*" onChange={(e) => handleFileUpload(e, "audio")} />
-                      </label>
-                      <button onClick={sendLocation} className="flex flex-col items-center justify-center p-3 bg-white/[0.02] border border-white/5 rounded-2xl hover:bg-white/[0.05] transition-colors">
-                        <LocationIcon className="w-5 h-5 text-rose-400 mb-1" />
-                        <span className="text-[7px] font-black uppercase text-white/40">Location</span>
-                      </button>
-                      <button 
-                        onClick={() => {
-                          setShowOptions(false);
-                          startRecording();
-                        }} 
-                        className="flex flex-col items-center justify-center p-3 bg-white/[0.02] border border-white/5 rounded-2xl hover:bg-white/[0.05] transition-colors"
-                      >
-                        <Mic className="w-5 h-5 text-amber-400 mb-1" />
-                        <span className="text-[7px] font-black uppercase text-white/40">Voice</span>
-                      </button>
+            ) : (
+              <>
+                {autoDeleteMode !== "none" && (
+                  <div className="mb-3 flex items-center justify-center gap-2">
+                    <div className={`px-3 py-1.5 rounded-full text-[8px] font-black uppercase tracking-widest flex items-center gap-1.5 ${
+                      autoDeleteMode === "view" ? "bg-orange-500/20 text-orange-400 border border-orange-500/30" :
+                      autoDeleteMode === "1h" ? "bg-amber-500/20 text-amber-400 border border-amber-500/30" :
+                      "bg-red-500/20 text-red-400 border border-red-500/30"
+                    }`}>
+                      {autoDeleteMode === "view" ? <Eye className="w-3 h-3" /> : <Clock className="w-3 h-3" />}
+                      {autoDeleteMode === "view" ? "Delete After View" : autoDeleteMode === "1h" ? "Delete After 1 Hour" : "Delete After 3 Hours"}
                     </div>
-                  </motion.div>
+                  </div>
                 )}
-              </AnimatePresence>
-              
-              <AnimatePresence>
-                {isRecording && (
-                  <motion.div 
-                    initial={{ opacity: 0, scale: 0.95 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    exit={{ opacity: 0, scale: 0.95 }}
-                    className="absolute inset-0 z-[60] bg-black/90 backdrop-blur-xl flex items-center justify-between px-6 rounded-[2rem]"
-                  >
-                    <div className="flex items-center gap-4">
-                      <div className="flex items-center gap-2">
-                        <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.8)]" />
-                        <span className="text-sm font-black text-white tabular-nums">
-                          {Math.floor(recordingTime / 60)}:{String(recordingTime % 60).padStart(2, '0')}
-                        </span>
-                      </div>
-                      <div className="h-4 w-px bg-white/10" />
-                      <p className="text-[10px] font-black uppercase tracking-widest text-white/40">Recording Voice Packet...</p>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <Button 
-                        variant="ghost" 
-                        size="icon" 
-                        onClick={() => {
-                          if (mediaRecorderRef.current) {
-                            mediaRecorderRef.current.onstop = null;
-                            mediaRecorderRef.current.stop();
-                            setIsRecording(false);
-                            if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
-                          }
-                        }}
-                        className="h-10 w-10 bg-white/5 hover:bg-red-500/20 text-red-400 rounded-xl"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </Button>
-                      <Button 
-                        onClick={stopRecording}
-                        className="h-10 px-6 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-[10px] font-black uppercase tracking-widest"
-                      >
-                        <Send className="w-4 h-4 mr-2" />
-                        Transmit
-                      </Button>
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-          </div>
-      </footer>
+                <div className="flex items-center gap-3 relative">
+                  <Button variant="ghost" size="icon" onClick={() => setShowOptions(!showOptions)} className={`h-12 w-12 rounded-2xl transition-all ${showOptions ? 'bg-indigo-600 text-white rotate-45' : 'bg-white/5 text-white/20'}`}><Plus className="w-6 h-6" /></Button>
+                  <input value={newMessage} onChange={(e) => setNewMessage(e.target.value)} onKeyDown={(e) => e.key === "Enter" && sendMessage()} placeholder="Type signal packet..." className="flex-1 bg-white/[0.03] border border-white/10 rounded-[2rem] h-12 px-6 text-sm outline-none focus:border-indigo-500/50" />
+                  <Button onClick={() => sendMessage()} disabled={!newMessage.trim()} className="h-12 w-12 rounded-2xl bg-indigo-600 hover:bg-indigo-500 shadow-lg shadow-indigo-600/20 disabled:opacity-20"><Send className="w-5 h-5" /></Button>
+                  
+                  <AnimatePresence>
+                    {showOptions && (
+                      <motion.div initial={{ opacity: 0, y: 10, scale: 0.9 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 10, scale: 0.9 }} className="absolute bottom-20 left-0 w-72 bg-[#0a0a0a] border border-white/10 rounded-[2.5rem] p-4 shadow-2xl z-50 overflow-hidden">
+                        <div className="grid grid-cols-3 gap-2">
+                          <label className="flex flex-col items-center justify-center p-3 bg-white/[0.02] border border-white/5 rounded-2xl cursor-pointer hover:bg-white/5">
+                            <ImageIcon className="w-5 h-5 text-indigo-400 mb-1" />
+                            <span className="text-[7px] font-black uppercase text-white/40">Photo</span>
+                            <input type="file" className="hidden" accept="image/*" onChange={(e) => handleFileUpload(e, "image")} />
+                          </label>
+                          <label className="flex flex-col items-center justify-center p-3 bg-white/[0.02] border border-white/5 rounded-2xl cursor-pointer hover:bg-white/5">
+                            <Video className="w-5 h-5 text-purple-400 mb-1" />
+                            <span className="text-[7px] font-black uppercase text-white/40">Video</span>
+                            <input type="file" className="hidden" accept="video/*" onChange={(e) => handleFileUpload(e, "video")} />
+                          </label>
+                          <button onClick={() => startCamera()} className="flex flex-col items-center justify-center p-3 bg-white/[0.02] border border-white/5 rounded-2xl hover:bg-white/5">
+                            <Camera className="w-5 h-5 text-orange-400 mb-1" />
+                            <span className="text-[7px] font-black uppercase text-white/40">Snapshot</span>
+                          </button>
+                          <button onClick={startRecording} className="flex flex-col items-center justify-center p-3 bg-white/[0.02] border border-white/5 rounded-2xl hover:bg-white/5">
+                            <Mic className="w-5 h-5 text-red-400 mb-1" />
+                            <span className="text-[7px] font-black uppercase text-white/40">Audio</span>
+                          </button>
+                          <button onClick={sendLocation} className="flex flex-col items-center justify-center p-3 bg-white/[0.02] border border-white/5 rounded-2xl hover:bg-white/5">
+                            <MapPin className="w-5 h-5 text-emerald-400 mb-1" />
+                            <span className="text-[7px] font-black uppercase text-white/40">Location</span>
+                          </button>
+                          <label className="flex flex-col items-center justify-center p-3 bg-white/[0.02] border border-white/5 rounded-2xl cursor-pointer hover:bg-white/5">
+                            <Volume2 className="w-5 h-5 text-blue-400 mb-1" />
+                            <span className="text-[7px] font-black uppercase text-white/40">File</span>
+                            <input type="file" className="hidden" accept="audio/*" onChange={(e) => handleFileUpload(e, "audio")} />
+                          </label>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+              </>
+            )}
+        </footer>
 
-      <AnimatePresence>{showCamera && (<div className="fixed inset-0 z-[150] bg-black flex flex-col items-center justify-center"><video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" /><div className="absolute bottom-10 flex gap-6 items-center"><Button onClick={() => setShowCamera(false)} variant="ghost" className="bg-white/10 hover:bg-white/20 rounded-full h-14 w-14"><X className="w-6 h-6 text-white" /></Button><button onClick={capturePhoto} className="w-20 h-20 rounded-full border-4 border-white flex items-center justify-center"><div className="w-14 h-14 rounded-full bg-white" /></button></div></div>)}</AnimatePresence>
+
+        <AnimatePresence>
+          {longPressedMessage && (
+            <motion.div 
+              initial={{ opacity: 0 }} 
+              animate={{ opacity: 1 }} 
+              exit={{ opacity: 0 }} 
+              onClick={() => setLongPressedMessage(null)}
+              className="fixed inset-0 z-[200] bg-black/40 backdrop-blur-sm flex items-center justify-center p-6"
+            >
+              <motion.div 
+                initial={{ scale: 0.9, y: 20 }} 
+                animate={{ scale: 1, y: 0 }} 
+                exit={{ scale: 0.9, y: 20 }}
+                onClick={(e) => e.stopPropagation()}
+                className="bg-zinc-900 border border-white/10 rounded-[2.5rem] p-6 w-full max-w-xs shadow-2xl space-y-6"
+              >
+                <div className="flex justify-around py-2">
+                  {["❤️", "👍", "🔥", "😂", "😮", "😢"].map(emoji => (
+                    <button 
+                      key={emoji} 
+                      onClick={() => addReaction(longPressedMessage.id, emoji)}
+                      className="text-2xl hover:scale-125 transition-transform active:scale-90"
+                    >
+                      {emoji}
+                    </button>
+                  ))}
+                </div>
+                
+                <div className="space-y-2">
+                  <button 
+                    onClick={() => saveToVault(longPressedMessage)}
+                    className="w-full flex items-center gap-4 p-4 bg-white/5 border border-white/5 rounded-2xl hover:bg-white/10 transition-all group"
+                  >
+                    <div className="p-3 bg-indigo-500/20 rounded-xl group-hover:bg-indigo-500 transition-colors">
+                      <Shield className="w-5 h-5 text-indigo-400 group-hover:text-white" />
+                    </div>
+                    <div className="text-left">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-white">Save to Vault</p>
+                      <p className="text-[8px] font-bold uppercase tracking-widest text-white/30">Secure Archive</p>
+                    </div>
+                  </button>
+
+                  <button 
+                    onClick={() => {
+                      navigator.clipboard.writeText(longPressedMessage.decrypted_content);
+                      toast.success("Copied to clipboard");
+                      setLongPressedMessage(null);
+                    }}
+                    className="w-full flex items-center gap-4 p-4 bg-white/5 border border-white/5 rounded-2xl hover:bg-white/10 transition-all group"
+                  >
+                    <div className="p-3 bg-white/5 rounded-xl group-hover:bg-white/20 transition-colors">
+                      <Plus className="w-5 h-5 text-white/40 group-hover:text-white" />
+                    </div>
+                    <div className="text-left">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-white">Copy Signal</p>
+                      <p className="text-[8px] font-bold uppercase tracking-widest text-white/30">Clipboard Buffer</p>
+                    </div>
+                  </button>
+
+                  <button 
+                    onClick={async () => {
+                      await supabase.from("messages").delete().eq("id", longPressedMessage.id);
+                      setMessages(prev => prev.filter(m => m.id !== longPressedMessage.id));
+                      setLongPressedMessage(null);
+                    }}
+                    className="w-full flex items-center gap-4 p-4 bg-red-500/5 border border-red-500/10 rounded-2xl hover:bg-red-500/10 transition-all group"
+                  >
+                    <div className="p-3 bg-red-500/20 rounded-xl group-hover:bg-red-500 transition-colors">
+                      <Trash2 className="w-5 h-5 text-red-400 group-hover:text-white" />
+                    </div>
+                    <div className="text-left">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-red-400">Purge Packet</p>
+                      <p className="text-[8px] font-bold uppercase tracking-widest text-red-500/30">Permanent Delete</p>
+                    </div>
+                  </button>
+                </div>
+
+                <Button 
+                  onClick={() => setLongPressedMessage(null)}
+                  variant="ghost"
+                  className="w-full text-[10px] font-black uppercase tracking-[0.3em] text-white/20"
+                >
+                  Close Matrix
+                </Button>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>{showCamera && (<div className="fixed inset-0 z-[150] bg-black flex flex-col items-center justify-center"><video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" /><div className="absolute bottom-10 flex gap-6 items-center"><Button onClick={() => setShowCamera(false)} variant="ghost" className="bg-white/10 hover:bg-white/20 rounded-full h-14 w-14"><X className="w-6 h-6 text-white" /></Button><button onClick={capturePhoto} className="w-20 h-20 rounded-full border-4 border-white flex items-center justify-center"><div className="w-14 h-14 rounded-full bg-white" /></button></div></div>)}</AnimatePresence>
+
 
       <AnimatePresence>{showSnapshotView && (<motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.9 }} className="fixed inset-0 z-[100] bg-black backdrop-blur-3xl flex items-center justify-center p-3 sm:p-6"><div className="relative w-full max-w-2xl bg-black rounded-[2rem] overflow-hidden border border-white/10 flex flex-col"><img src={showSnapshotView.media_url} alt="" className="w-full h-full object-contain" /><button onClick={closeSnapshot} className="absolute top-4 right-4 w-12 h-12 bg-black/50 backdrop-blur-md rounded-full flex items-center justify-center border border-white/10"><X className="w-6 h-6 text-white" /></button></div></motion.div>)}</AnimatePresence>
 
